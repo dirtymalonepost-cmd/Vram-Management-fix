@@ -1,0 +1,19 @@
+# Stop and disable the custom VRAM-limit service
+sudo systemctl disable --now dmemcg-appslice-limit.service
+
+# Remove the custom service and helper script
+sudo rm -f /etc/systemd/system/dmemcg-appslice-limit.service
+sudo rm -f /usr/local/sbin/set-dmem-appslice-limit
+sudo systemctl daemon-reload
+
+# Restore app.slice to unlimited VRAM
+set APP /sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice
+printf '%s\n' 'drm/0000:03:00.0/vram max' | sudo tee $APP/dmem.max >/dev/null
+
+# Disable dmem delegation on app.slice and user@1000
+set USERCG /sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service
+printf '%s\n' '-dmem' | sudo tee $APP/cgroup.subtree_control >/dev/null
+printf '%s\n' '-dmem' | sudo tee $USERCG/cgroup.subtree_control >/dev/null
+
+# Remove the CachyOS VRAM-management packages
+sudo pacman -Rns dmemcg-booster plasma-foreground-booster kcgroups

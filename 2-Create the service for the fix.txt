@@ -1,0 +1,275 @@
+# ============================================================================
+# Persistent Linux VRAM Safety-Margin Limiter
+# ============================================================================
+#
+# WHAT THIS DOES
+#
+# This creates a systemd "oneshot" service that runs once during boot.
+#
+# It:
+#   1. Waits for your user cgroup and app.slice to exist.
+#   2. Enables the Linux DMEM controller on the user cgroup.
+#   3. Enables DMEM on app.slice.
+#   4. Reads the GPU's actual VRAM capacity automatically.
+#   5. Subtracts a configurable VRAM safety margin.
+#   6. Sets that value as app.slice's dmem.max limit.
+#   7. Exits immediately after the limit has been applied.
+#
+# IMPORTANT:
+# The script does NOT continuously monitor VRAM and does NOT run in the
+# background after it finishes. The Linux kernel itself enforces dmem.max.
+#
+# Example with a 4 GiB GPU:
+#
+#   VRAM capacity = 4278190080 bytes
+#   Safety margin = 50 MiB
+#   VRAM limit    = 4225761280 bytes
+#
+# The custom limit is applied to app.slice, so applications/games inside
+# that slice are subject to the same VRAM ceiling.
+# ============================================================================
+
+
+# ---------------------------------------------------------------------------
+# Remove an older copy of this custom service, if one exists.
+# ---------------------------------------------------------------------------
+sudo systemctl disable --now dmemcg-appslice-limit.service 2>/dev/null
+
+
+# ---------------------------------------------------------------------------
+# Create the actual limiter script.
+#
+# NOTE:
+# This script uses /bin/sh, NOT Fish. It therefore works independently of
+# whatever shell the user normally uses.
+# ---------------------------------------------------------------------------
+printf '%s\n' \
+'#!/bin/sh' \
+'' \
+'# ============================================================================' \
+'# VRAM safety-margin configuration' \
+'# ============================================================================' \
+'' \
+'# CHANGE THIS NUMBER to change the amount of VRAM left unused.' \
+'# Examples: 50 = 50 MiB, 75 = 75 MiB, 100 = 100 MiB' \
+'RESERVE_MIB=50' \
+'RESERVE=$((RESERVE_MIB * 1024 * 1024))' \
+'' \
+'# ---------------------------------------------------------------------------' \
+'# Cgroup paths' \
+'# ---------------------------------------------------------------------------' \
+'' \
+'# IMPORTANT:' \
+'# 1000 is the UID of the user this configuration is being installed for.' \
+'# Change "1000" if the target user has a different UID.' \
+'USERCG="/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service"' \
+'APP="$USERCG/app.slice"' \
+'' \
+'# ---------------------------------------------------------------------------' \
+'# Wait for systemd to create the user cgroup hierarchy.' \
+'# ---------------------------------------------------------------------------' \
+'' \
+'for i in $(seq 1 120); do' \
+'    if [ -d "$USERCG" ] && [ -d "$APP" ]; then' \
+'        break' \
+'    fi' \
+'    sleep 1' \
+'done' \
+'' \
+'if [ ! -d "$USERCG" ] || [ ! -d "$APP" ]; then' \
+'    echo "ERROR: user cgroup or app.slice was not created." >&2' \
+'    exit 1' \
+'fi' \
+'' \
+'# ---------------------------------------------------------------------------' \
+'# Wait for the kernel DMEM controller to be available.' \
+'# ---------------------------------------------------------------------------' \
+'' \
+'# dmem must be available on the parent before app.slice can use it.' \
+'for i in $(seq 1 120); do' \
+'    if grep -qw dmem "$USERCG/cgroup.controllers" 2>/dev/null; then' \
+'        break' \
+'    fi' \
+'    sleep 1' \
+'done' \
+'' \
+'if ! grep -qw dmem "$USERCG/cgroup.controllers" 2>/dev/null; then' \
+'    echo "ERROR: the dmem controller is not available on user@1000." >&2' \
+'    exit 1' \
+'fi' \
+'' \
+'# ---------------------------------------------------------------------------' \
+'# Enable DMEM on user@1000.service.' \
+'# ---------------------------------------------------------------------------' \
+'' \
+'# Repeat this until the kernel confirms that dmem is actually enabled.' \
+'for i in $(seq 1 120); do' \
+'    if grep -qw dmem "$USERCG/cgroup.subtree_control" 2>/dev/null; then' \
+'        break' \
+'    fi' \
+'' \
+'    printf "+dmem\n" > "$USERCG/cgroup.subtree_control" 2>/dev/null || true' \
+'    sleep 1' \
+'done' \
+'' \
+'if ! grep -qw dmem "$USERCG/cgroup.subtree_control" 2>/dev/null; then' \
+'    echo "ERROR: could not enable dmem on user@1000." >&2' \
+'    exit 1' \
+'fi' \
+'' \
+'# ---------------------------------------------------------------------------' \
+'# Wait for app.slice to inherit the DMEM controller.' \
+'# ---------------------------------------------------------------------------' \
+'' \
+'for i in $(seq 1 120); do' \
+'    if grep -qw dmem "$APP/cgroup.controllers" 2>/dev/null; then' \
+'        break' \
+'    fi' \
+'    sleep 1' \
+'done' \
+'' \
+'if ! grep -qw dmem "$APP/cgroup.controllers" 2>/dev/null; then' \
+'    echo "ERROR: dmem did not become available on app.slice." >&2' \
+'    exit 1' \
+'fi' \
+'' \
+'# ---------------------------------------------------------------------------' \
+'# Enable DMEM on app.slice.' \
+'# ---------------------------------------------------------------------------' \
+'' \
+'for i in $(seq 1 120); do' \
+'    if grep -qw dmem "$APP/cgroup.subtree_control" 2>/dev/null; then' \
+'        break' \
+'    fi' \
+'' \
+'    printf "+dmem\n" > "$APP/cgroup.subtree_control" 2>/dev/null || true' \
+'    sleep 1' \
+'done' \
+'' \
+'if ! grep -qw dmem "$APP/cgroup.subtree_control" 2>/dev/null; then' \
+'    echo "ERROR: could not enable dmem on app.slice." >&2' \
+'    exit 1' \
+'fi' \
+'' \
+'# ---------------------------------------------------------------------------' \
+'# Wait for the DMEM limit/current files to appear.' \
+'# ---------------------------------------------------------------------------' \
+'' \
+'for i in $(seq 1 120); do' \
+'    if [ -f "$APP/dmem.max" ] && [ -f "$APP/dmem.current" ]; then' \
+'        break' \
+'    fi' \
+'    sleep 1' \
+'done' \
+'' \
+'if [ ! -f "$APP/dmem.max" ] || [ ! -f "$APP/dmem.current" ]; then' \
+'    echo "ERROR: app.slice DMEM files did not appear." >&2' \
+'    exit 1' \
+'fi' \
+'' \
+'# ---------------------------------------------------------------------------' \
+'# Read the actual GPU VRAM capacity.' \
+'# ---------------------------------------------------------------------------' \
+'' \
+'# dmem.capacity reports the GPU VRAM device and its capacity in bytes.' \
+'# This avoids hard-coding a 4 GiB GPU size into the script.' \
+'DEVICE=$(grep -m1 "/vram$" /sys/fs/cgroup/dmem.capacity | cut -d " " -f 1)' \
+'CAPACITY=$(grep -m1 "/vram$" /sys/fs/cgroup/dmem.capacity | awk "{print \$2}")' \
+'' \
+'if [ -z "$DEVICE" ] || [ -z "$CAPACITY" ]; then' \
+'    echo "ERROR: could not read GPU VRAM capacity." >&2' \
+'    exit 1' \
+'fi' \
+'' \
+'# ---------------------------------------------------------------------------' \
+'# Calculate the new VRAM ceiling.' \
+'# ---------------------------------------------------------------------------' \
+'' \
+'TARGET=$((CAPACITY - RESERVE))' \
+'' \
+'if [ "$TARGET" -le 0 ]; then' \
+'    echo "ERROR: VRAM safety margin is larger than GPU capacity." >&2' \
+'    exit 1' \
+'fi' \
+'' \
+'# ---------------------------------------------------------------------------' \
+'# Check current app.slice VRAM usage before lowering the limit.' \
+'# ---------------------------------------------------------------------------' \
+'' \
+'CURRENT=$(grep -m1 "/vram$" "$APP/dmem.current" | awk "{print \$2}")' \
+'' \
+'# Never apply a limit lower than the amount of VRAM already charged.' \
+'if [ -n "$CURRENT" ] && [ "$CURRENT" -gt "$TARGET" ]; then' \
+'    echo "ERROR: app.slice is already using more VRAM than the requested limit." >&2' \
+'    echo "Current: $CURRENT bytes" >&2' \
+'    echo "Target:  $TARGET bytes" >&2' \
+'    exit 1' \
+'fi' \
+'' \
+'# ---------------------------------------------------------------------------' \
+'# Apply the VRAM ceiling.' \
+'# ---------------------------------------------------------------------------' \
+'' \
+'if ! printf "%s %s\n" "$DEVICE" "$TARGET" > "$APP/dmem.max"; then' \
+'    echo "ERROR: failed to write the VRAM limit." >&2' \
+'    exit 1' \
+'fi' \
+'' \
+'# ---------------------------------------------------------------------------' \
+'# Print useful information to the systemd journal.' \
+'# ---------------------------------------------------------------------------' \
+'' \
+'echo "VRAM capacity: $CAPACITY bytes"' \
+'echo "Safety margin: ${RESERVE_MIB} MiB"' \
+'echo "app.slice VRAM limit: $TARGET bytes"' \
+'echo "VRAM safety limit successfully applied."' \
+'exit 0' \
+| sudo tee /usr/local/sbin/set-dmem-appslice-limit >/dev/null
+
+
+# Make the limiter executable.
+sudo chmod 755 /usr/local/sbin/set-dmem-appslice-limit
+
+
+# ---------------------------------------------------------------------------
+# Create the systemd service.
+#
+# This is a oneshot service:
+#   - it runs once during boot,
+#   - applies the VRAM limit,
+#   - exits,
+#   - and does NOT continuously consume CPU/RAM.
+#
+# TimeoutStartSec=180 allows the cgroup hierarchy enough time to appear.
+# ---------------------------------------------------------------------------
+printf '%s\n' \
+'[Unit]' \
+'Description=Apply persistent app.slice VRAM safety limit' \
+'After=user@1000.service' \
+'Requires=user@1000.service' \
+'' \
+'[Service]' \
+'Type=oneshot' \
+'ExecStart=/usr/local/sbin/set-dmem-appslice-limit' \
+'RemainAfterExit=yes' \
+'TimeoutStartSec=180' \
+'' \
+'[Install]' \
+'WantedBy=multi-user.target' \
+| sudo tee /etc/systemd/system/dmemcg-appslice-limit.service >/dev/null
+
+
+# Reload systemd so it sees the new service.
+sudo systemctl daemon-reload
+
+
+# Enable the service permanently so it runs automatically at every boot.
+sudo systemctl enable dmemcg-appslice-limit.service
+
+
+# Run it immediately without requiring a reboot.
+sudo systemctl restart dmemcg-appslice-limit.service
+
+
+# Show whether the service succeeded.
+systemctl status dmemcg-appslice-limit.service --no-pager -l

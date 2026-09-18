@@ -1,0 +1,19 @@
+for CachyOS — pacman:
+
+sudo pacman -S dmemcg-booster plasma-foreground-booster
+sudo systemctl enable --now dmemcg-booster-system
+
+for vanilla Arch:
+
+yay -S dmemcg-booster plasma-foreground-booster-dmemcg
+sudo systemctl enable --now dmemcg-booster-system
+
+or
+
+paru -S dmemcg-booster plasma-foreground-booster-dmemcg
+sudo systemctl enable --now dmemcg-booster-system
+
+
+for nobara:
+
+sudo dnf install dmemcg-booster plasma-foreground-booster-dmemcg

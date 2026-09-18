@@ -1,0 +1,16 @@
+for pkg in dmemcg-booster plasma-foreground-booster kcgroups
+    if type -q pacman
+        pacman -Q $pkg 2>/dev/null; or echo "$pkg: not installed"
+    else if type -q rpm
+        rpm -q $pkg 2>/dev/null; or echo "$pkg: not installed"
+    else if type -q dpkg-query
+        dpkg-query -W -f='${Package} ${Status}\n' $pkg 2>/dev/null | grep -q 'install ok installed'; and echo "$pkg: installed"; or echo "$pkg: not installed"
+    else
+        echo "No supported package manager found"
+        break
+    end
+end
+
+systemctl show dmemcg-appslice-limit.service -p ActiveState -p SubState -p ExecMainStatus
+
+printf 'VRAM capacity: '; cat /sys/fs/cgroup/dmem.capacity; printf 'app.slice max: '; cat /sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/dmem.max
