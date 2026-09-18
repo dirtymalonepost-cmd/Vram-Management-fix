@@ -1,45 +1,134 @@
-# Linux VRAM Management & 4GB VRAM Stutter Fix
+# Linux VRAM Manager
 
-A collection of installation commands, configuration files, and troubleshooting information for Linux VRAM management using the DMEM cgroup system.
+A small Bash-based utility for Linux gaming systems using the kernel DMEM cgroup interface. It can install or enable the available VRAM-management stack, apply a persistent `dmem.max` VRAM headroom limit, verify the configuration, and remove the custom setup.
 
-This repository is mainly aimed at Linux gaming systems with limited VRAM, especially AMD GPUs where heavy VRAM pressure can cause severe stuttering, FPS drops, or freezes.
+> **Experimental:** The `dmem.max` ceiling is a workaround intended to leave a small amount of VRAM headroom instead of allowing `app.slice` to consume the full reported capacity. Results can vary by GPU, driver, kernel, game, and desktop environment.
 
-## What's included
+## Features
 
-* Installation commands for `dmemcg-booster`
-* KDE Plasma foreground VRAM management
-* Commands for checking whether DMEM is active
-* A custom `dmem.max` safety-limit workaround
-* Automatic VRAM-capacity detection
-* A configurable VRAM safety margin (for example, 50 MiB)
-* Verification and troubleshooting commands
+- Install and enable supported DMEM/VRAM-management packages
+- Choose or change the VRAM safety margin in MiB
+- Automatically detect the current user's UID
+- Detect AMD/Intel `vram` and NVIDIA `vidmem` DMEM regions
+- Apply the ceiling persistently with a systemd oneshot service
+- Verify service state, VRAM capacity, `dmem.max`, and `dmem.current`
+- Remove the custom ceiling and its systemd configuration
+- Optionally remove the VRAM-management packages
 
-## Important
+## How it works
 
-The `dmemcg-booster` and Plasma foreground-booster packages are third-party projects and are **not my software**. They are included here only as installation references.
+The custom workaround lowers `app.slice/dmem.max` below the GPU's reported VRAM capacity, leaving a configurable amount of headroom.
 
-Upstream projects:
+Example for a 4 GiB GPU with 50 MiB of headroom:
 
-* dmemcg-booster: https://gitlab.steamos.cloud/holo/dmemcg-booster
-* KCGroups / Plasma integration: https://github.com/pixelcluster/kcgroups
-* KDE KCGroups: https://github.com/KDE/kcgroups
+```text
+VRAM capacity : 4278190080 bytes
+Safety margin : 50 MiB
+VRAM ceiling  : 4225761280 bytes
+```
 
-The custom `dmem.max` limiter in this repository is a separate experimental workaround. It is intended to leave a small amount of VRAM unused instead of allowing `app.slice` to consume the entire available VRAM capacity.
+The custom service is a **oneshot**: it applies the limit and exits. It does not continuously monitor VRAM or keep a monitoring process running. After the service exits, the kernel continues enforcing `dmem.max`.
 
-The custom scripts were developed with AI assistance and then tested on my own system. **Use them at your own risk and inspect the commands before running them**, especially commands that use `sudo` or modify `/sys/fs/cgroup`.
+## Requirements
 
-This repository is not affiliated with or endorsed by CachyOS, Valve, KDE, or the developers of the upstream projects.
+The target system needs:
 
-## Example
+- systemd
+- cgroup v2
+- a kernel with DMEM cgroup support
+- a GPU driver that exposes device VRAM through the DMEM controller
+- a normal systemd user cgroup hierarchy with `app.slice`
 
-On a 4 GiB GPU, a 50 MiB safety margin results in approximately:
+The package installer currently supports:
 
-`4 GiB - 50 MiB = 4225761280 bytes`
+- **CachyOS / Arch-based systems:** `pacman`, with AUR fallback when `yay` or `paru` is available
+- **Fedora / Nobara-style systems:** `dnf`, when the required packages are available in the configured repositories
+- **Bazzite:** detects the integrated DMEM stack instead of attempting to remove its image-provided packages
 
-The safety margin can be changed in the script.
+Other distributions may work when the same kernel, systemd, cgroup, and GPU-driver requirements are satisfied, but are not guaranteed by this tool.
 
-## Why this exists
+## Usage
 
-The goal is to provide an easy-to-follow reference for experimenting with Linux DMEM/VRAM management, particularly on systems where running completely out of VRAM causes severe performance problems.
+### From source
 
-Always test the configuration on your own hardware and revert it if it causes instability.
+```bash
+chmod +x vram-manager.sh
+./vram-manager.sh
+```
+
+### Binary release
+
+On x86_64 Linux systems, download `Linux-VRAM-Manager-x86_64` from the latest GitHub Release, make it executable if necessary, and run it.
+
+The Bash source is kept in the repository so it can be inspected directly.
+
+## Menu
+
+```text
+1) Install / enable VRAM management
+2) Apply / change VRAM ceiling
+3) Verify current / post-reboot state
+4) Remove custom VRAM ceiling
+5) Remove everything
+6) System / package status
+7) Exit
+```
+
+## What the custom limiter changes
+
+The custom limiter creates:
+
+```text
+/usr/local/sbin/set-dmem-appslice-limit
+/etc/systemd/system/dmemcg-appslice-limit@.service
+/etc/default/dmemcg-appslice-limit
+```
+
+It also changes the live kernel-managed cgroup interface at:
+
+```text
+/sys/fs/cgroup/.../app.slice/dmem.max
+```
+
+It does **not** modify:
+
+- GPU drivers or GPU firmware
+- BIOS/UEFI settings
+- kernel files
+- game files
+- personal files or media
+- the installed files of the upstream VRAM-management packages
+
+The `/sys/fs/cgroup` entries are kernel-managed cgroup interfaces, not ordinary files stored on disk.
+
+## Upstream credits
+
+This project does not claim ownership of the underlying DMEM/VRAM-management projects. It uses their functionality where available and adds a separate `dmem.max` headroom workaround and management interface.
+
+### dmemcg-booster
+
+Service for enabling and controlling DMEM cgroup limits for foreground games.
+
+https://gitlab.steamos.cloud/holo/dmemcg-booster
+
+### KCGroups / Plasma integration
+
+`pixelcluster/kcgroups` is a fork of KDE's KCGroups library with DMEM cgroup integration for foreground applications.
+
+https://github.com/pixelcluster/kcgroups
+
+CachyOS packages the KDE integration as `plasma-foreground-booster` and identifies `kcgroups` as its base package.
+
+https://packages.cachyos.org/package/cachyos/x86_64/plasma-foreground-booster
+
+### Linux DMEM cgroup functionality
+
+The underlying `dmem.*` interface is provided by the Linux kernel; this project does not implement the kernel controller.
+
+## AI disclosure
+
+This project was developed with AI assistance. The source code is published in the repository so the implementation can be inspected directly. The custom `dmem.max` workaround was personally modified and tested on CachyOS.
+
+## License
+
+The custom code in this repository is released under the MIT License. Third-party projects, packages, and kernel components referenced by this project remain under their respective upstream licenses.
