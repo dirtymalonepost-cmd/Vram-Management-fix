@@ -1,91 +1,55 @@
-# Persistent app.slice VRAM ceiling; change RESERVE_MIB to adjust headroom.
+set UID_NOW (id -u)
 
 sudo systemctl disable --now dmemcg-appslice-limit.service 2>/dev/null
+sudo rm -f /etc/systemd/system/dmemcg-appslice-limit.service /usr/local/sbin/set-dmem-appslice-limit
 
 printf '%s\n' \
 '#!/bin/sh' \
-'' \
 'RESERVE_MIB=50    # Change this to 75, 100, etc.' \
-'RESERVE=$((RESERVE_MIB * 1024 * 1024))' \
+'ID="$1"' \
+'APP="/sys/fs/cgroup/user.slice/user-$ID.slice/user@$ID.service/app.slice"' \
 '' \
-'USERCG="/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service"' \
-'APP="$USERCG/app.slice"' \
-'' \
-'# Wait for the cgroup hierarchy.' \
-'for i in $(seq 1 120); do' \
-'    [ -d "$USERCG" ] && [ -d "$APP" ] && break' \
+'# Wait for DMEM to appear on app.slice.' \
+'for i in $(seq 1 300); do' \
+'    [ -r "$APP/dmem.max" ] && [ -r "$APP/dmem.current" ] && [ -r /sys/fs/cgroup/dmem.capacity ] && break' \
 '    sleep 1' \
 'done' \
 '' \
-'[ -d "$USERCG" ] && [ -d "$APP" ] || exit 1' \
+'[ -r "$APP/dmem.max" ] && [ -r "$APP/dmem.current" ] || exit 1' \
 '' \
-'# Enable dmem on user@1000.' \
-'for i in $(seq 1 120); do' \
-'    grep -qw dmem "$USERCG/cgroup.controllers" 2>/dev/null || { sleep 1; continue; }' \
-'    grep -qw dmem "$USERCG/cgroup.subtree_control" 2>/dev/null && break' \
-'    printf "+dmem\n" > "$USERCG/cgroup.subtree_control" 2>/dev/null || true' \
-'    sleep 1' \
-'done' \
-'' \
-'grep -qw dmem "$USERCG/cgroup.subtree_control" 2>/dev/null || exit 1' \
-'' \
-'# Enable dmem on app.slice.' \
-'for i in $(seq 1 120); do' \
-'    grep -qw dmem "$APP/cgroup.controllers" 2>/dev/null || { sleep 1; continue; }' \
-'    grep -qw dmem "$APP/cgroup.subtree_control" 2>/dev/null && break' \
-'    printf "+dmem\n" > "$APP/cgroup.subtree_control" 2>/dev/null || true' \
-'    sleep 1' \
-'done' \
-'' \
-'grep -qw dmem "$APP/cgroup.subtree_control" 2>/dev/null || exit 1' \
-'' \
-'# Wait for dmem files.' \
-'for i in $(seq 1 120); do' \
-'    [ -f "$APP/dmem.max" ] && [ -f "$APP/dmem.current" ] && break' \
-'    sleep 1' \
-'done' \
-'' \
-'[ -f "$APP/dmem.max" ] && [ -f "$APP/dmem.current" ] || exit 1' \
-'' \
-'# Read VRAM capacity.' \
-'DEVICE=$(awk '\''$1 ~ /\/vram$/ {print $1; exit}'\'' /sys/fs/cgroup/dmem.capacity)' \
-'CAPACITY=$(awk '\''$1 ~ /\/vram$/ {print $2; exit}'\'' /sys/fs/cgroup/dmem.capacity)' \
-'' \
+'set -- $(grep -m1 /vram /sys/fs/cgroup/dmem.capacity)' \
+'DEVICE=$1' \
+'CAPACITY=$2' \
 '[ -n "$DEVICE" ] && [ -n "$CAPACITY" ] || exit 1' \
 '' \
-'TARGET=$((CAPACITY - RESERVE))' \
-'[ "$TARGET" -gt 0 ] || exit 1' \
-'' \
-'# Do not set the limit below current usage.' \
-'CURRENT=$(awk '\''$1 ~ /\/vram$/ {print $2; exit}'\'' "$APP/dmem.current")' \
-'if [ -n "$CURRENT" ] && [ "$CURRENT" -gt "$TARGET" ]; then' \
-'    echo "ERROR: current VRAM usage exceeds requested limit." >&2' \
-'    exit 1' \
-'fi' \
+'TARGET=$((CAPACITY - RESERVE_MIB * 1024 * 1024))' \
+'set -- $(grep -m1 /vram "$APP/dmem.current")' \
+'CURRENT=$2' \
+'[ -z "$CURRENT" ] || [ "$CURRENT" -le "$TARGET" ] || exit 1' \
 '' \
 'printf "%s %s\n" "$DEVICE" "$TARGET" > "$APP/dmem.max" || exit 1' \
 'echo "VRAM capacity: $CAPACITY bytes"' \
-'echo "Safety margin: ${RESERVE_MIB} MiB"' \
+'echo "Safety margin: $RESERVE_MIB MiB"' \
 'echo "app.slice limit: $TARGET bytes"' \
-'exit 0' \
 | sudo tee /usr/local/sbin/set-dmem-appslice-limit >/dev/null
 
 sudo chmod 755 /usr/local/sbin/set-dmem-appslice-limit
 
 printf '%s\n' \
 '[Unit]' \
-'Description=Apply persistent app.slice VRAM safety limit' \
-'After=user@1000.service' \
-'Requires=user@1000.service' \
+'Description=Apply app.slice VRAM safety limit' \
+'After=user@__UID__.service graphical.target dmemcg-booster-system.service' \
+'Wants=user@__UID__.service dmemcg-booster-system.service' \
 '' \
 '[Service]' \
 'Type=oneshot' \
-'ExecStart=/usr/local/sbin/set-dmem-appslice-limit' \
+'ExecStart=/usr/local/sbin/set-dmem-appslice-limit __UID__' \
 'RemainAfterExit=yes' \
-'TimeoutStartSec=180' \
+'TimeoutStartSec=300' \
 '' \
 '[Install]' \
-'WantedBy=multi-user.target' \
+'WantedBy=graphical.target' \
+| string replace -a __UID__ $UID_NOW \
 | sudo tee /etc/systemd/system/dmemcg-appslice-limit.service >/dev/null
 
 sudo systemctl daemon-reload
