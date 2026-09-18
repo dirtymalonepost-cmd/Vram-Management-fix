@@ -1,58 +1,86 @@
-set UID_NOW (id -u)
+sudo bash -c '
+USER_NAME="${SUDO_USER:-$USER}"
+USER_ID="$(id -u "$USER_NAME")"
 
-sudo systemctl disable --now dmemcg-appslice-limit.service 2>/dev/null
-sudo rm -f /etc/systemd/system/dmemcg-appslice-limit.service /usr/local/sbin/set-dmem-appslice-limit
+systemctl disable --now dmemcg-appslice-limit.service 2>/dev/null || true
+rm -f /etc/systemd/system/dmemcg-appslice-limit.service
+rm -f /usr/local/sbin/set-dmem-appslice-limit
 
-printf '%s\n' \
-'#!/bin/sh' \
-'RESERVE_MIB=50    # Change this to 75, 100, etc.' \
-'ID="$1"' \
-'APP="/sys/fs/cgroup/user.slice/user-$ID.slice/user@$ID.service/app.slice"' \
-'' \
-'# Wait for DMEM to appear on app.slice.' \
-'for i in $(seq 1 300); do' \
-'    [ -r "$APP/dmem.max" ] && [ -r "$APP/dmem.current" ] && [ -r /sys/fs/cgroup/dmem.capacity ] && break' \
-'    sleep 1' \
-'done' \
-'' \
-'[ -r "$APP/dmem.max" ] && [ -r "$APP/dmem.current" ] || exit 1' \
-'' \
-'set -- $(grep -m1 /vram /sys/fs/cgroup/dmem.capacity)' \
-'DEVICE=$1' \
-'CAPACITY=$2' \
-'[ -n "$DEVICE" ] && [ -n "$CAPACITY" ] || exit 1' \
-'' \
-'TARGET=$((CAPACITY - RESERVE_MIB * 1024 * 1024))' \
-'set -- $(grep -m1 /vram "$APP/dmem.current")' \
-'CURRENT=$2' \
-'[ -z "$CURRENT" ] || [ "$CURRENT" -le "$TARGET" ] || exit 1' \
-'' \
-'printf "%s %s\n" "$DEVICE" "$TARGET" > "$APP/dmem.max" || exit 1' \
-'echo "VRAM capacity: $CAPACITY bytes"' \
-'echo "Safety margin: $RESERVE_MIB MiB"' \
-'echo "app.slice limit: $TARGET bytes"' \
-| sudo tee /usr/local/sbin/set-dmem-appslice-limit >/dev/null
+cat > /usr/local/sbin/set-dmem-appslice-limit <<EOF
+#!/bin/sh
 
-sudo chmod 755 /usr/local/sbin/set-dmem-appslice-limit
+RESERVE_MIB=50
+USER_ID="\$1"
+ROOT="/sys/fs/cgroup"
+APP="\$ROOT/user.slice/user-\$USER_ID.slice/user@\$USER_ID.service/app.slice"
 
-printf '%s\n' \
-'[Unit]' \
-'Description=Apply app.slice VRAM safety limit' \
-'After=user@__UID__.service graphical.target dmemcg-booster-system.service' \
-'Wants=user@__UID__.service dmemcg-booster-system.service' \
-'' \
-'[Service]' \
-'Type=oneshot' \
-'ExecStart=/usr/local/sbin/set-dmem-appslice-limit __UID__' \
-'RemainAfterExit=yes' \
-'TimeoutStartSec=300' \
-'' \
-'[Install]' \
-'WantedBy=graphical.target' \
-| string replace -a __UID__ $UID_NOW \
-| sudo tee /etc/systemd/system/dmemcg-appslice-limit.service >/dev/null
+# Wait for app.slice and its DMEM files.
+for i in \$(seq 1 300); do
+    [ -r "\$APP/dmem.max" ] && [ -r "\$APP/dmem.current" ] && [ -r "\$ROOT/dmem.capacity" ] && break
+    sleep 1
+done
 
-sudo systemctl daemon-reload
-sudo systemctl enable dmemcg-appslice-limit.service
-sudo systemctl restart dmemcg-appslice-limit.service
+[ -r "\$APP/dmem.max" ] || exit 1
+[ -r "\$APP/dmem.current" ] || exit 1
+[ -r "\$ROOT/dmem.capacity" ] || exit 1
+
+TMP="\$(mktemp)" || exit 1
+trap "rm -f \"\$TMP\"" EXIT
+
+# Find all AMD/Intel vram and NVIDIA vidmem regions.
+while read -r DEVICE CAPACITY; do
+    case "\$DEVICE" in
+        */vram|*/vidmem)
+            TARGET=\$((CAPACITY - RESERVE_MIB * 1024 * 1024))
+            [ "\$TARGET" -gt 0 ] || exit 1
+
+            LINE="\$(grep -F -m1 "\$DEVICE" "\$APP/dmem.current" 2>/dev/null || true)"
+            CURRENT=0
+            if [ -n "\$LINE" ]; then
+                set -- \$LINE
+                CURRENT="\$2"
+            fi
+
+            if [ "\$CURRENT" -gt "\$TARGET" ]; then
+                echo "ERROR: current VRAM usage exceeds requested limit." >&2
+                exit 1
+            fi
+
+            printf "%s %s\n" "\$DEVICE" "\$TARGET" >> "\$TMP"
+            ;;
+    esac
+done < "\$ROOT/dmem.capacity"
+
+[ -s "\$TMP" ] || exit 1
+
+# Apply all detected VRAM limits at once.
+cat "\$TMP" > "\$APP/dmem.max" || exit 1
+
+echo "VRAM safety margin: \$RESERVE_MIB MiB"
+cat "\$TMP"
+exit 0
+EOF
+
+chmod 755 /usr/local/sbin/set-dmem-appslice-limit
+
+cat > /etc/systemd/system/dmemcg-appslice-limit.service <<EOF
+[Unit]
+Description=Apply app.slice VRAM safety limit
+After=user@${USER_ID}.service
+Requires=user@${USER_ID}.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/set-dmem-appslice-limit ${USER_ID}
+RemainAfterExit=yes
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable dmemcg-appslice-limit.service
+systemctl restart dmemcg-appslice-limit.service
 systemctl status dmemcg-appslice-limit.service --no-pager -l
+'
