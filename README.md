@@ -1,23 +1,44 @@
 # Linux VRAM Manager
 
-A small Bash-based utility for Linux gaming systems using the kernel DMEM cgroup interface. It can install or enable the available VRAM-management stack, apply a persistent `dmem.max` VRAM headroom limit, verify the configuration, and remove the custom setup.
+**Version: 1.1.1**
 
-> **Experimental:** The `dmem.max` ceiling is a workaround intended to leave a small amount of VRAM headroom instead of allowing `app.slice` to consume the full reported capacity. Results can vary by GPU, driver, kernel, game, and desktop environment.
+A Bash-based utility for Linux gaming systems using the kernel DMEM cgroup interface. It installs or enables the available VRAM-management stack, selects a desktop-appropriate integration when one exists, applies a persistent `dmem.max` VRAM headroom limit, verifies the configuration, and can remove the custom setup.
+
+> **Experimental:** the `dmem.max` ceiling is a workaround intended to leave a small amount of VRAM headroom instead of allowing `app.slice` to consume the full reported DMEM capacity. Results can vary by GPU, driver, kernel, game, workload, and desktop environment.
 
 ## Features
 
-- Install and enable supported DMEM/VRAM-management packages
+- Install and enable the base DMEM/VRAM-management stack
+- Detect AMD/Intel-style `vram` and NVIDIA-style `vidmem` DMEM regions
+- Detect the current user and systemd cgroup path automatically
+- Detect many Linux desktops and Wayland compositors
+- Select a desktop-specific foreground integration where a verified project exists
+- Use Gamescope as the generic fallback instead of installing a Plasma-only component on other desktops
 - Choose or change the VRAM safety margin in MiB
-- Automatically detect the current user's UID
-- Detect AMD/Intel `vram` and NVIDIA `vidmem` DMEM regions
 - Apply the ceiling persistently with a systemd oneshot service
-- Verify service state, VRAM capacity, `dmem.max`, and `dmem.current`
-- Remove the custom ceiling and its systemd configuration
-- Optionally remove the VRAM-management packages
+- Verify `dmem.capacity`, `dmem.max`, `dmem.current`, and service state
+- Prompt before rebooting when a restart/reboot is actually needed
+- Remove installed VRAM-management packages when requested
+
+## Desktop / compositor support
+
+Compatible desktop integrations:
+- KDE Plasma
+- GNOME
+- Hyprland
+- Niri
+
+Other desktops and window managers use Gamescope as the generic fallback.
 
 ## How it works
 
-The custom workaround lowers `app.slice/dmem.max` below the GPU's reported VRAM capacity, leaving a configurable amount of headroom.
+The base DMEM stack exposes device-memory cgroups. The custom workaround lowers:
+
+```text
+app.slice/dmem.max
+```
+
+below the reported device-memory capacity, leaving a configurable reserve.
 
 Example for a 4 GiB GPU with 50 MiB of headroom:
 
@@ -27,27 +48,42 @@ Safety margin : 50 MiB
 VRAM ceiling  : 4225761280 bytes
 ```
 
-The custom service is a **oneshot**: it applies the limit and exits. It does not continuously monitor VRAM or keep a monitoring process running. After the service exits, the kernel continues enforcing `dmem.max`.
+The custom service is a **oneshot**. It applies the limit and exits; it does not continuously monitor VRAM. The kernel continues enforcing the cgroup limit after the service exits.
+
+The helper handles multiple `vram` / `vidmem` regions in one `dmem.max` write so multi-GPU or multi-region systems do not have one entry overwrite another.
 
 ## Requirements
 
-The target system needs:
+The persistent ceiling path requires:
 
 - systemd
 - cgroup v2
-- a kernel with DMEM cgroup support
-- a GPU driver that exposes device VRAM through the DMEM controller
-- a normal systemd user cgroup hierarchy with `app.slice`
+- a kernel with the DMEM cgroup controller
+- a GPU driver exposing device memory through DMEM
+- a systemd user hierarchy containing `app.slice`
 
-The package installer currently supports:
+Automatic package installation currently targets Arch-family and Fedora-family systems. Other systems can still work when the same kernel, systemd, cgroup, and driver requirements are satisfied.
 
-- **CachyOS / Arch-based systems:** `pacman`, with AUR fallback when `yay` or `paru` is available
-- **Fedora / Nobara-style systems:** `dnf`, when the required packages are available in the configured repositories
-- **Bazzite:** detects the integrated DMEM stack instead of attempting to remove its image-provided packages
+## GPU support
 
-Other distributions may work when the same kernel, systemd, cgroup, and GPU-driver requirements are satisfied, but are not guaranteed by this tool.
+The script does not hard-code a GPU vendor. It recognizes device-memory regions named like:
 
-## Usage
+```text
+*/vram
+*/vram0
+*/vidmem
+*/vidmem0
+```
+
+For NVIDIA, working support still depends on a driver/kernel combination that exposes video memory through Linux DMEM. An NVIDIA GPU by itself does not guarantee that `dmem.capacity` will contain a usable `vidmem` entry.
+
+## Reboot behavior
+
+Applying the `dmem.max` ceiling takes effect immediately and **does not inherently require a reboot**. After applying it, the tool explicitly asks whether you want to reboot anyway to verify persistence.
+
+A reboot is requested when the selected installation changes something that needs a fresh session/kernel, such as installing a new DMEM-capable kernel. Some desktop integrations only need a session restart; the tool tells you when that applies.
+
+## Installation / usage
 
 ### From source
 
@@ -56,11 +92,9 @@ chmod +x vram-manager.sh
 ./vram-manager.sh
 ```
 
-### Binary release
+### Binary
 
-On x86_64 Linux systems, download `Linux-VRAM-Manager-x86_64` from the latest GitHub Release, make it executable if necessary, and run it.
-
-The Bash source is kept in the repository so it can be inspected directly.
+Run `Linux-VRAM-Manager-x86_64` from the GitHub release assets on x86_64 Linux.
 
 ## Menu
 
@@ -74,60 +108,52 @@ The Bash source is kept in the repository so it can be inspected directly.
 7) Exit
 ```
 
-## What the custom limiter changes
-
-The custom limiter creates:
+## Files created by the custom limiter
 
 ```text
 /usr/local/sbin/set-dmem-appslice-limit
-/etc/systemd/system/dmemcg-appslice-limit@.service
+/etc/systemd/system/dmemcg-appslice-limit.service
 /etc/default/dmemcg-appslice-limit
+/var/lib/linux-vram-manager/installed-packages
 ```
 
-It also changes the live kernel-managed cgroup interface at:
+The live cgroup setting is under:
 
 ```text
 /sys/fs/cgroup/.../app.slice/dmem.max
 ```
 
-It does **not** modify:
+The package-installation record is used so **Remove everything** does not blindly remove VRAM packages that were already installed before the tool was run.
 
-- GPU drivers or GPU firmware
-- BIOS/UEFI settings
-- kernel files
+## What the custom limiter does not modify
+
+- GPU firmware or GPU BIOS
+- motherboard BIOS/UEFI settings
+- the kernel image or kernel source
 - game files
-- personal files or media
-- the installed files of the upstream VRAM-management packages
+- Proton/Wine prefixes
+- swap configuration
+- physical VRAM capacity
+- ordinary personal files or media
 
-The `/sys/fs/cgroup` entries are kernel-managed cgroup interfaces, not ordinary files stored on disk.
+The `/sys/fs/cgroup` entries are kernel-managed interfaces, not ordinary files stored on disk.
 
-## Upstream credits
+## Upstream projects and credits
 
-This project does not claim ownership of the underlying DMEM/VRAM-management projects. It uses their functionality where available and adds a separate `dmem.max` headroom workaround and management interface.
+This project does not claim ownership of the upstream DMEM/foreground-management projects. It combines their available functionality with a separate configurable `dmem.max` headroom workaround.
 
-### dmemcg-booster
+- **dmemcg-booster:** https://gitlab.steamos.cloud/holo/dmemcg-booster
+- **KDE KCGroups:** https://github.com/pixelcluster/kcgroups
+- **GNOME VRAM Booster:** https://github.com/sachesi/gnome-vram-booster
+- **Hyprland Focused Booster:** https://github.com/tumrin/hyprland-focused-booster
+- **Niri Focused Booster:** https://github.com/1Naim/niri-focused-booster
+- **Gamescope:** https://github.com/ValveSoftware/gamescope
 
-Service for enabling and controlling DMEM cgroup limits for foreground games.
-
-https://gitlab.steamos.cloud/holo/dmemcg-booster
-
-### KCGroups / Plasma integration
-
-`pixelcluster/kcgroups` is a fork of KDE's KCGroups library with DMEM cgroup integration for foreground applications.
-
-https://github.com/pixelcluster/kcgroups
-
-CachyOS packages the KDE integration as `plasma-foreground-booster` and identifies `kcgroups` as its base package.
-
-https://packages.cachyos.org/package/cachyos/x86_64/plasma-foreground-booster
-
-### Linux DMEM cgroup functionality
-
-The underlying `dmem.*` interface is provided by the Linux kernel; this project does not implement the kernel controller.
+The underlying `dmem.*` controller is provided by the Linux kernel; this project does not implement the kernel controller.
 
 ## AI disclosure
 
-This project was developed with AI assistance. The source code is published in the repository so the implementation can be inspected directly. The custom `dmem.max` workaround was personally modified and tested on CachyOS.
+This project was developed with AI assistance. The source is published so the implementation can be inspected directly. The custom `dmem.max` workaround was personally modified and tested on CachyOS.
 
 ## License
 
