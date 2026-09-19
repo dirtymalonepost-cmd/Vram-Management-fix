@@ -1,6 +1,5 @@
 # Linux VRAM Manager
 
-**Version: 1.1.1**
 
 A Bash-based utility for Linux gaming systems using the kernel DMEM cgroup interface. It installs or enables the available VRAM-management stack, selects a desktop-appropriate integration when one exists, applies a persistent `dmem.max` VRAM headroom limit, verifies the configuration, and can remove the custom setup.
 
